@@ -794,6 +794,20 @@ fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
                 }
                 gtk::Inhibit(false)
             }));
+        },
+
+        prop(
+            // @prop timeout - timeout of the command
+            timeout: as_duration = Duration::from_millis(200),
+            // @prop onkeypress - a command that get's run when a key is pressed. The placeholder `{}` used in the command will be replaced with key name.
+            onkeypress: as_string = ""
+        ) {
+            gtk_widget.add_events(gdk::EventMask::KEY_PRESS_MASK);
+            connect_signal_handler!(gtk_widget, gtk_widget.connect_key_press_event(move |_, evt| {
+                let key_name = evt.keyval().name().map(|s| s.as_str().to_string()).unwrap_or_default();
+                run_command(timeout, &onkeypress, &[key_name]);
+                gtk::Inhibit(false)
+            }));
         }
     });
 
