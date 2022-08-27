@@ -636,7 +636,7 @@ const WIDGET_NAME_EVENTBOX: &str = "eventbox";
 /// @widget eventbox
 /// @desc a container which can receive events and must contain exactly one child. Supports `:hover` and `:active` css selectors.
 fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
-    let gtk_widget = gtk::EventBox::new();
+    let gtk_widget = gtk::EventBox::builder().can_focus(true).build();
 
     // Support :hover selector
     gtk_widget.connect_enter_notify_event(|gtk_widget, evt| {
@@ -800,12 +800,35 @@ fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
             // @prop timeout - timeout of the command
             timeout: as_duration = Duration::from_millis(200),
             // @prop onkeypress - a command that get's run when a key is pressed. The placeholder `{}` used in the command will be replaced with key name.
-            onkeypress: as_string = ""
+            onkeypress: as_string = "",
+            // @prop keyargs - arguments that get passed into 'onkeypress' command. possible values: $keyargs
+            keyargs: as_string = "name"
         ) {
+            let args = parse_keyargs(&keyargs)?;
+
+            gtk_widget.grab_focus();
             gtk_widget.add_events(gdk::EventMask::KEY_PRESS_MASK);
+
             connect_signal_handler!(gtk_widget, gtk_widget.connect_key_press_event(move |_, evt| {
-                let key_name = evt.keyval().name().map(|s| s.as_str().to_string()).unwrap_or_default();
-                run_command(timeout, &onkeypress, &[key_name]);
+                match args {
+                    KeyArgs::Name => if let Some(name) = evt.keyval().name() {
+                        run_command(timeout, &onkeypress, &[name.as_str()]);
+                    },
+                    KeyArgs::Code => {
+                        run_command(timeout, &onkeypress, &[evt.hardware_keycode()]);
+                    },
+                    KeyArgs::Unicode => if let Some(code) = evt.keyval().to_unicode() {
+                        run_command(timeout, &onkeypress, &[code]);
+                    },
+                    KeyArgs::All => {
+                        run_command(timeout, &onkeypress, &[
+                            evt.hardware_keycode().to_string(),
+                            evt.state().to_string(),
+                            evt.keyval().name().map(|s| s.as_str().to_string()).unwrap_or_default(),
+                            evt.keyval().to_unicode().map(|c| c.to_string()).unwrap_or_default(),
+                        ]);
+                    }
+                };
                 gtk::Inhibit(false)
             }));
         }
@@ -1050,6 +1073,22 @@ fn parse_align(o: &str) -> Result<gtk::Align> {
         "center" => gtk::Align::Center,
         "start" => gtk::Align::Start,
         "end" => gtk::Align::End,
+    }
+}
+
+enum KeyArgs {
+    Name,
+    Code,
+    Unicode,
+    All,
+}
+
+fn parse_keyargs(s: &str) -> Result<KeyArgs> {
+    enum_parse! { "keyargs", s,
+        "name" => KeyArgs::Name,
+        "code" => KeyArgs::Code,
+        "unicode" => KeyArgs::Unicode,
+        "all" => KeyArgs::All,
     }
 }
 
