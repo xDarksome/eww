@@ -645,7 +645,7 @@ const WIDGET_NAME_EVENTBOX: &str = "eventbox";
 /// @widget eventbox
 /// @desc a container which can receive events and must contain exactly one child. Supports `:hover` and `:active` css selectors.
 fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
-    let gtk_widget = gtk::EventBox::builder().can_focus(true).build();
+    let gtk_widget = gtk::EventBox::new();
 
     // Support :hover selector
     gtk_widget.connect_enter_notify_event(|gtk_widget, evt| {
