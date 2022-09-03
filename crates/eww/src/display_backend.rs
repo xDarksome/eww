@@ -20,6 +20,11 @@ mod platform {
 
     pub fn initialize_window(window_def: &WindowDefinition, monitor: gdk::Rectangle) -> Option<gtk::Window> {
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
+
+        if let Some(map) = window_def.keymap.as_ref() {
+            crate::keymap::assign_to_window(map, &window)
+        }
+
         // Initialising a layer shell surface
         gtk_layer_shell::init_for_window(&window);
         // Sets the monitor where the surface is shown

@@ -13,12 +13,16 @@ use crate::{
 };
 use eww_shared_util::{AttrName, Span, VarName};
 
-use super::{backend_window_options::BackendWindowOptions, widget_use::WidgetUse, window_geometry::WindowGeometry};
+use super::{
+    backend_window_options::BackendWindowOptions, widget_use::WidgetUse, window_geometry::WindowGeometry,
+    window_keymap::WindowKeymap,
+};
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct WindowDefinition {
     pub name: String,
     pub geometry: Option<WindowGeometry>,
+    pub keymap: Option<WindowKeymap>,
     pub stacking: WindowStacking,
     pub monitor_number: Option<i32>,
     pub widget: WidgetUse,
@@ -36,10 +40,11 @@ impl FromAstElementContent for WindowDefinition {
         let resizable = attrs.primitive_optional("resizable")?.unwrap_or(true);
         let stacking = attrs.primitive_optional("stacking")?.unwrap_or(WindowStacking::Foreground);
         let geometry = attrs.ast_optional("geometry")?;
+        let keymap = attrs.ast_optional("keymap")?;
         let backend_options = BackendWindowOptions::from_attrs(&mut attrs)?;
         let widget = iter.expect_any().and_then(WidgetUse::from_ast)?;
         iter.expect_done()?;
-        Ok(Self { name, monitor_number, resizable, widget, stacking, geometry, backend_options })
+        Ok(Self { name, monitor_number, resizable, widget, stacking, geometry, keymap, backend_options })
     }
 }
 

@@ -35,6 +35,7 @@ pub mod error;
 mod error_handling_ctx;
 pub mod geometry;
 pub mod ipc_server;
+pub mod keymap;
 pub mod opts;
 pub mod script_var_handler;
 pub mod server;

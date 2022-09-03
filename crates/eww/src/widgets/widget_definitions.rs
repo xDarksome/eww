@@ -806,7 +806,6 @@ fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
         ) {
             let args = parse_keyargs(&keyargs)?;
 
-            gtk_widget.grab_focus();
             gtk_widget.add_events(gdk::EventMask::KEY_PRESS_MASK);
 
             connect_signal_handler!(gtk_widget, gtk_widget.connect_key_press_event(move |_, evt| {

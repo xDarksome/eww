@@ -11,7 +11,7 @@ pub mod widget_definitions;
 /// This command may use placeholders which will be replaced by the values of the arguments given.
 /// This can either be the placeholder `{}`, which will be replaced by the first argument,
 /// Or a placeholder like `{0}`, `{1}`, etc, which will refer to the respective argument.
-fn run_command<T: std::fmt::Display>(timeout: std::time::Duration, cmd: &str, args: &[T]) {
+pub fn run_command<T: std::fmt::Display>(timeout: std::time::Duration, cmd: &str, args: &[T]) {
     use wait_timeout::ChildExt;
     let cmd = replace_placeholders(cmd, args);
     std::thread::spawn(move || {
