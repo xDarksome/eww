@@ -3,7 +3,9 @@ use std::{collections::HashMap, fmt::Display, str::FromStr};
 use simplexpr::{dynval::DynVal, SimplExpr};
 
 use crate::{
-    error::{AstError, AstResult},
+    config::monitor::MonitorIdentifier,
+    error::{DiagError, DiagResult},
+    format_diagnostic::ToDiagnostic,
     parser::{
         ast::Ast,
         ast_iterator::AstIterator,
@@ -24,7 +26,7 @@ pub struct WindowDefinition {
     pub geometry: Option<WindowGeometry>,
     pub keymap: Option<WindowKeymap>,
     pub stacking: WindowStacking,
-    pub monitor_number: Option<i32>,
+    pub monitor: Option<MonitorIdentifier>,
     pub widget: WidgetUse,
     pub resizable: bool,
     pub backend_options: BackendWindowOptions,
@@ -33,18 +35,18 @@ pub struct WindowDefinition {
 impl FromAstElementContent for WindowDefinition {
     const ELEMENT_NAME: &'static str = "defwindow";
 
-    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> AstResult<Self> {
+    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> DiagResult<Self> {
         let (_, name) = iter.expect_symbol()?;
         let mut attrs = iter.expect_key_values()?;
-        let monitor_number = attrs.primitive_optional("monitor")?;
+        let monitor = attrs.primitive_optional("monitor")?;
         let resizable = attrs.primitive_optional("resizable")?.unwrap_or(true);
         let stacking = attrs.primitive_optional("stacking")?.unwrap_or(WindowStacking::Foreground);
         let geometry = attrs.ast_optional("geometry")?;
         let keymap = attrs.ast_optional("keymap")?;
         let backend_options = BackendWindowOptions::from_attrs(&mut attrs)?;
-        let widget = iter.expect_any().and_then(WidgetUse::from_ast)?;
+        let widget = iter.expect_any().map_err(DiagError::from).and_then(WidgetUse::from_ast)?;
         iter.expect_done()?;
-        Ok(Self { name, monitor_number, resizable, widget, stacking, geometry, keymap, backend_options })
+        Ok(Self { name, monitor, resizable, widget, stacking, geometry, keymap, backend_options })
     }
 }
 

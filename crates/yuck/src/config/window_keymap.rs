@@ -4,7 +4,7 @@ use simplexpr::{dynval::DynVal, SimplExpr};
 
 use crate::{
     enum_parse,
-    error::{AstError, AstResult},
+    error::{DiagError, DiagResult},
     parser::{
         ast::Ast,
         ast_iterator::AstIterator,
@@ -25,7 +25,7 @@ pub struct WindowKeymap {
 impl FromAstElementContent for WindowKeymap {
     const ELEMENT_NAME: &'static str = "keymap";
 
-    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> AstResult<Self> {
+    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> DiagResult<Self> {
         let mut attrs = iter.expect_key_values()?;
         let inhibit = attrs.primitive_optional::<bool, _>("inhibit")?;
 
@@ -55,7 +55,7 @@ pub struct Bind {
 impl FromAstElementContent for Bind {
     const ELEMENT_NAME: &'static str = "bind";
 
-    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> AstResult<Self> {
+    fn from_tail<I: Iterator<Item = Ast>>(span: Span, mut iter: AstIterator<I>) -> DiagResult<Self> {
         let mut attrs = iter.expect_key_values()?;
         let inhibit = attrs.primitive_optional("inhibit")?;
 

@@ -1,9 +1,7 @@
 #![allow(clippy::option_map_unit_fn)]
 use super::{build_widget::BuilderArgs, circular_progressbar::*, run_command, transform::*};
 use crate::{
-    def_widget, enum_parse,
-    error::DiagError,
-    error_handling_ctx,
+    def_widget, enum_parse, error_handling_ctx,
     util::{list_difference, unindent},
     widgets::build_widget::build_gtk_widget,
 };
@@ -25,8 +23,8 @@ use std::{
     time::Duration,
 };
 use yuck::{
-    config::validate::ValidationError,
-    error::{AstError, AstResult},
+    error::{DiagError, DiagResult},
+    format_diagnostic::{span_to_secondary_label, DiagnosticExt},
     gen_diagnostic,
     parser::from_ast::FromAst,
 };
@@ -109,10 +107,10 @@ pub(super) fn widget_use_to_gtk_widget(bargs: &mut BuilderArgs) -> Result<gtk::W
         WIDGET_NAME_SCROLL => build_gtk_scrolledwindow(bargs)?.upcast(),
         WIDGET_NAME_OVERLAY => build_gtk_overlay(bargs)?.upcast(),
         _ => {
-            return Err(AstError::ValidationError(ValidationError::UnknownWidget(
-                bargs.widget_use.name_span,
-                bargs.widget_use.name.to_string(),
-            ))
+            return Err(DiagError(gen_diagnostic! {
+                msg = format!("referenced unknown widget `{}`", bargs.widget_use.name),
+                label = bargs.widget_use.name_span => "Used here",
+            })
             .into())
         }
     };
@@ -128,13 +126,16 @@ static DEPRECATED_ATTRS: Lazy<HashSet<&str>> =
 /// @desc these properties apply to _all_ widgets, and can be used anywhere!
 pub(super) fn resolve_widget_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Widget) -> Result<()> {
     let deprecated: HashSet<_> = DEPRECATED_ATTRS.to_owned();
-    let contained_deprecated: Vec<_> = bargs.unhandled_attrs.drain_filter(|a| deprecated.contains(&a.0 as &str)).collect();
+    let contained_deprecated: Vec<_> = bargs.unhandled_attrs.drain_filter(|a, _| deprecated.contains(&a.0 as &str)).collect();
     if !contained_deprecated.is_empty() {
         let diag = error_handling_ctx::stringify_diagnostic(gen_diagnostic! {
             kind =  Severity::Error,
             msg = "Unsupported attributes provided",
             label = bargs.widget_use.span => "Found in here",
-            note = format!("The attribute(s) ({}) has/have been removed, as GTK does not support it consistently. Instead, use eventbox to wrap this widget and set the attribute there. See #251 (https://github.com/elkowar/eww/issues/251) for more details.", contained_deprecated.iter().join(", ")),
+            note = format!(
+                "The attribute(s) ({}) has/have been removed, as GTK does not support it consistently. Instead, use eventbox to wrap this widget and set the attribute there. See #251 (https://github.com/elkowar/eww/issues/251) for more details.",
+                contained_deprecated.iter().map(|(x, _)| x).join(", ")
+            ),
         }).unwrap();
         eprintln!("{}", diag);
     }
@@ -224,11 +225,18 @@ pub(super) fn resolve_range_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Ran
         gtk::Inhibit(false)
     }));
 
+    // We keep track of the last value that has been set via gtk_widget.set_value (by a change in the value property).
+    // We do this so we can detect if the new value came from a scripted change or from a user input from within the value_changed handler
+    // and only run on_change when it's caused by manual user input
+    let last_set_value = Rc::new(RefCell::new(None));
+    let last_set_value_clone = last_set_value.clone();
+
     def_widget!(bargs, _g, gtk_widget, {
         // @prop value - the value
         prop(value: as_f64) {
             if !*is_being_dragged.borrow() {
-                gtk_widget.set_value(value)
+                *last_set_value.borrow_mut() = Some(value);
+                gtk_widget.set_value(value);
             }
         },
         // @prop min - the minimum value
@@ -240,8 +248,12 @@ pub(super) fn resolve_range_attrs(bargs: &mut BuilderArgs, gtk_widget: &gtk::Ran
         prop(timeout: as_duration = Duration::from_millis(200), onchange: as_string) {
             gtk_widget.set_sensitive(true);
             gtk_widget.add_events(gdk::EventMask::PROPERTY_CHANGE_MASK);
+            let last_set_value = last_set_value_clone.clone();
             connect_signal_handler!(gtk_widget, gtk_widget.connect_value_changed(move |gtk_widget| {
-                run_command(timeout, &onchange, &[gtk_widget.value()]);
+                let value = gtk_widget.value();
+                if last_set_value.borrow_mut().take() != Some(value) {
+                    run_command(timeout, &onchange, &[value]);
+                }
             }));
         }
     });
@@ -535,7 +547,7 @@ fn build_gtk_overlay(bargs: &mut BuilderArgs) -> Result<gtk::Overlay> {
 
     match bargs.widget_use.children.len().cmp(&1) {
         Ordering::Less => {
-            Err(DiagError::new(gen_diagnostic!("overlay must contain at least one element", bargs.widget_use.span)).into())
+            Err(DiagError(gen_diagnostic!("overlay must contain at least one element", bargs.widget_use.span)).into())
         }
         Ordering::Greater | Ordering::Equal => {
             let mut children = bargs.widget_use.children.iter().map(|child| {
@@ -574,18 +586,15 @@ fn build_center_box(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
 
     match bargs.widget_use.children.len().cmp(&3) {
         Ordering::Less => {
-            Err(DiagError::new(gen_diagnostic!("centerbox must contain exactly 3 elements", bargs.widget_use.span)).into())
+            Err(DiagError(gen_diagnostic!("centerbox must contain exactly 3 elements", bargs.widget_use.span)).into())
         }
         Ordering::Greater => {
             let (_, additional_children) = bargs.widget_use.children.split_at(3);
             // we know that there is more than three children, so unwrapping on first and left here is fine.
             let first_span = additional_children.first().unwrap().span();
             let last_span = additional_children.last().unwrap().span();
-            Err(DiagError::new(gen_diagnostic!(
-                "centerbox must contain exactly 3 elements, but got more",
-                first_span.to(last_span)
-            ))
-            .into())
+            Err(DiagError(gen_diagnostic!("centerbox must contain exactly 3 elements, but got more", first_span.to(last_span)))
+                .into())
         }
         Ordering::Equal => {
             let mut children = bargs.widget_use.children.iter().map(|child| {
@@ -857,7 +866,7 @@ fn build_gtk_literal(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
         prop(content: as_string) {
             gtk_widget.children().iter().for_each(|w| gtk_widget.remove(w));
             if !content.is_empty() {
-                let content_widget_use: AstResult<_> = try {
+                let content_widget_use: DiagResult<_> = try {
                     let ast = {
                         let mut yuck_files = error_handling_ctx::YUCK_FILES.write().unwrap();
                         let (span, asts) = yuck_files.load_str("<literal-content>".to_string(), content)?;
@@ -873,10 +882,11 @@ fn build_gtk_literal(bargs: &mut BuilderArgs) -> Result<gtk::Box> {
 
                 // TODO a literal should create a new scope, that I'm not even sure should inherit from root
                 let child_widget = build_gtk_widget(scope_graph, widget_defs.clone(), calling_scope, content_widget_use, None)
-                    .map_err(|e| AstError::ErrorContext {
-                        label_span: literal_use_span,
-                        context: "Error in the literal used here".to_string(),
-                        main_err: Box::new(error_handling_ctx::anyhow_err_to_diagnostic(&e).unwrap_or_else(|| gen_diagnostic!(e)))
+                    .map_err(|e| {
+                        let diagnostic = error_handling_ctx::anyhow_err_to_diagnostic(&e)
+                            .unwrap_or_else(|| gen_diagnostic!(e))
+                            .with_label(span_to_secondary_label(literal_use_span).with_message("Error in the literal used here"));
+                        DiagError(diagnostic)
                     })?;
                 gtk_widget.add(&child_widget);
                 child_widget.show();
@@ -893,9 +903,21 @@ fn build_gtk_calendar(bargs: &mut BuilderArgs) -> Result<gtk::Calendar> {
     let gtk_widget = gtk::Calendar::new();
     def_widget!(bargs, _g, gtk_widget, {
         // @prop day - the selected day
-        prop(day: as_f64) { gtk_widget.set_day(day as i32) },
+        prop(day: as_f64) {
+            if day < 1f64 || day > 31f64 {
+                log::warn!("Calendar day is not a number between 1 and 31");
+            } else {
+                gtk_widget.set_day(day as i32)
+            }
+        },
         // @prop month - the selected month
-        prop(month: as_f64) { gtk_widget.set_month(month as i32) },
+        prop(month: as_f64) {
+            if month < 1f64 || month > 12f64 {
+                log::warn!("Calendar month is not a number between 1 and 12");
+            } else {
+                gtk_widget.set_month(month as i32 - 1)
+            }
+        },
         // @prop year - the selected year
         prop(year: as_f64) { gtk_widget.set_year(year as i32) },
         // @prop show-details - show details
@@ -910,7 +932,6 @@ fn build_gtk_calendar(bargs: &mut BuilderArgs) -> Result<gtk::Calendar> {
         // @prop timeout - timeout of the command
         prop(timeout: as_duration = Duration::from_millis(200), onclick: as_string) {
             connect_signal_handler!(gtk_widget, gtk_widget.connect_day_selected(move |w| {
-                log::warn!("BREAKING CHANGE: The date is now provided via three values, set by the placeholders {{0}}, {{1}} and {{2}}. If you're currently using the onclick date, you will need to change this.");
                 run_command(
                     timeout,
                     &onclick,
@@ -979,8 +1000,8 @@ fn build_graph(bargs: &mut BuilderArgs) -> Result<super::graph::Graph> {
         // @prop max - the maximum value to show
         prop(min: as_f64 = 0, max: as_f64 = 100) {
             if min > max {
-                return Err(DiagError::new(gen_diagnostic!(
-                    format!("Graph's min ({}) should never be higher than max ({})",  min, max)
+                return Err(DiagError(gen_diagnostic!(
+                    format!("Graph's min ({min}) should never be higher than max ({max})")
                 )).into());
             }
             w.set_property("min", &min);

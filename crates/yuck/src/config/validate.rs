@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use simplexpr::SimplExpr;
 
 use crate::{
-    error::AstResult,
+    error::DiagResult,
     parser::{ast::Ast, ast_iterator::AstIterator, from_ast::FromAst},
 };
 
@@ -16,9 +16,6 @@ use eww_shared_util::{AttrName, Span, Spanned, VarName};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Unknown widget `{1}` referenced")]
-    UnknownWidget(Span, String),
-
     #[error("There is already a builtin widget called `{1}`")]
     AccidentalBuiltinOverride(Span, String),
 
@@ -37,7 +34,6 @@ pub enum ValidationError {
 impl Spanned for ValidationError {
     fn span(&self) -> Span {
         match self {
-            ValidationError::UnknownWidget(span, _) => *span,
             ValidationError::MissingAttr { use_span, .. } => *use_span,
             ValidationError::UnknownVariable { span, .. } => *span,
             ValidationError::AccidentalBuiltinOverride(span, ..) => *span,

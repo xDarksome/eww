@@ -3,9 +3,10 @@ use crate::{
     daemon_response::DaemonResponseSender,
     display_backend, error_handling_ctx,
     gtk::prelude::{ContainerExt, CssProviderExt, GtkWindowExt, StyleContextExt, WidgetExt},
+    paths::EwwPaths,
     script_var_handler::ScriptVarHandlerHandle,
     state::scope_graph::{ScopeGraph, ScopeIndex},
-    EwwPaths, *,
+    *,
 };
 use anyhow::anyhow;
 use eww_shared_util::VarName;
@@ -20,6 +21,7 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use yuck::{
     config::{
+        monitor::MonitorIdentifier,
         script_var_definition::ScriptVarDefinition,
         window_definition::WindowDefinition,
         window_geometry::{AnchorPoint, WindowGeometry},
@@ -27,13 +29,14 @@ use yuck::{
     value::Coords,
 };
 
+/// A command for the eww daemon.
+/// While these are mostly generated from eww CLI commands (see [`opts::ActionWithServer`]),
+/// they may also be generated from other places internally.
 #[derive(Debug)]
 pub enum DaemonCommand {
     NoOp,
     UpdateVars(Vec<(VarName, DynVal)>),
     ReloadConfigAndCss(DaemonResponseSender),
-    UpdateConfig(config::EwwConfig),
-    UpdateCss(String),
     OpenInspector,
     OpenMany {
         windows: Vec<String>,
@@ -45,7 +48,7 @@ pub enum DaemonCommand {
         pos: Option<Coords>,
         size: Option<Coords>,
         anchor: Option<AnchorPoint>,
-        screen: Option<i32>,
+        screen: Option<MonitorIdentifier>,
         should_toggle: bool,
         sender: DaemonResponseSender,
     },
@@ -115,7 +118,7 @@ impl std::fmt::Debug for App {
 }
 
 impl App {
-    /// Handle a DaemonCommand event.
+    /// Handle a [DaemonCommand] event.
     pub fn handle_command(&mut self, event: DaemonCommand) {
         log::debug!("Handling event: {:?}", &event);
         let result: Result<_> = try {
@@ -126,7 +129,7 @@ impl App {
                 }
                 DaemonCommand::UpdateVars(mappings) => {
                     for (var_name, new_value) in mappings {
-                        self.update_global_state(var_name, new_value);
+                        self.update_global_variable(var_name, new_value);
                     }
                 }
                 DaemonCommand::ReloadConfigAndCss(sender) => {
@@ -143,16 +146,9 @@ impl App {
 
                     sender.respond_with_error_list(errors)?;
                 }
-                DaemonCommand::UpdateConfig(config) => {
-                    self.load_config(config)?;
-                }
-                DaemonCommand::UpdateCss(css) => {
-                    self.load_css(&css)?;
-                }
                 DaemonCommand::KillServer => {
                     log::info!("Received kill command, stopping server!");
                     self.stop_application();
-                    let _ = crate::application_lifecycle::send_exit();
                 }
                 DaemonCommand::CloseAll => {
                     log::info!("Received close command, closing all windows");
@@ -175,15 +171,12 @@ impl App {
                 }
                 DaemonCommand::OpenWindow { window_name, pos, size, anchor, screen: monitor, should_toggle, sender } => {
                     let is_open = self.open_windows.contains_key(&window_name);
-                    let result = if is_open {
-                        if should_toggle {
-                            self.close_window(&window_name)
-                        } else {
-                            // user should use `eww reload` to reload windows (https://github.com/elkowar/eww/issues/260)
-                            Ok(())
-                        }
-                    } else {
+                    let result = if !is_open {
                         self.open_window(&window_name, pos, size, monitor, anchor)
+                    } else if should_toggle {
+                        self.close_window(&window_name)
+                    } else {
+                        Ok(())
                     };
                     sender.respond_with_result(result)?;
                 }
@@ -237,35 +230,48 @@ impl App {
         }
     }
 
+    /// Fully stop eww:
+    /// close all windows, stop the script_var_handler, quit the gtk appliaction and send the exit instruction to the lifecycle manager
     fn stop_application(&mut self) {
         self.script_var_handler.stop_all();
         for (_, window) in self.open_windows.drain() {
             window.close();
         }
         gtk::main_quit();
+        let _ = crate::application_lifecycle::send_exit();
     }
 
-    fn update_global_state(&mut self, fieldname: VarName, value: DynVal) {
-        let result = self.scope_graph.borrow_mut().update_global_value(&fieldname, value);
+    fn update_global_variable(&mut self, name: VarName, value: DynVal) {
+        let result = self.scope_graph.borrow_mut().update_global_value(&name, value);
         if let Err(err) = result {
             error_handling_ctx::print_error(err);
         }
 
-        if let Ok(linked_poll_vars) = self.eww_config.get_poll_var_link(&fieldname) {
-            linked_poll_vars.iter().filter_map(|name| self.eww_config.get_script_var(name).ok()).for_each(|var| {
-                if let ScriptVarDefinition::Poll(poll_var) = var {
-                    let scope_graph = self.scope_graph.borrow();
-                    let run_while = scope_graph
-                        .evaluate_simplexpr_in_scope(scope_graph.root_index, &poll_var.run_while_expr)
-                        .map(|v| v.as_bool());
-                    match run_while {
-                        Ok(Ok(true)) => self.script_var_handler.add(var.clone()),
-                        Ok(Ok(false)) => self.script_var_handler.stop_for_variable(poll_var.name.clone()),
-                        Ok(Err(err)) => error_handling_ctx::print_error(anyhow!(err)),
-                        Err(err) => error_handling_ctx::print_error(anyhow!(err)),
-                    };
-                }
-            });
+        self.apply_run_while_expressions_mentioning(&name);
+    }
+
+    /// Variables may be referenced in defpoll :run-while expressions.
+    /// Thus, when a variable changes, the run-while conditions of all variables
+    /// that mention the changed variable need to be reevaluated and reapplied.
+    fn apply_run_while_expressions_mentioning(&mut self, name: &VarName) {
+        let mentioning_vars = match self.eww_config.get_run_while_mentions_of(&name) {
+            Some(x) => x,
+            None => return,
+        };
+        let mentioning_vars = mentioning_vars.iter().filter_map(|name| self.eww_config.get_script_var(name).ok());
+        for var in mentioning_vars {
+            if let ScriptVarDefinition::Poll(poll_var) = var {
+                let scope_graph = self.scope_graph.borrow();
+                let run_while_result = scope_graph
+                    .evaluate_simplexpr_in_scope(scope_graph.root_index, &poll_var.run_while_expr)
+                    .map(|v| v.as_bool());
+                match run_while_result {
+                    Ok(Ok(true)) => self.script_var_handler.add(var.clone()),
+                    Ok(Ok(false)) => self.script_var_handler.stop_for_variable(poll_var.name.clone()),
+                    Ok(Err(err)) => error_handling_ctx::print_error(anyhow!(err)),
+                    Err(err) => error_handling_ctx::print_error(anyhow!(err)),
+                };
+            }
         }
     }
 
@@ -282,7 +288,7 @@ impl App {
 
         let unused_variables = self.scope_graph.borrow().currently_unused_globals();
         for unused_var in unused_variables {
-            log::debug!("stopping for {}", &unused_var);
+            log::debug!("stopping script-var {}", &unused_var);
             self.script_var_handler.stop_for_variable(unused_var.clone());
         }
 
@@ -294,7 +300,7 @@ impl App {
         window_name: &str,
         pos: Option<Coords>,
         size: Option<Coords>,
-        monitor: Option<i32>,
+        monitor: Option<MonitorIdentifier>,
         anchor: Option<AnchorPoint>,
     ) -> Result<()> {
         self.failed_windows.remove(window_name);
@@ -327,12 +333,13 @@ impl App {
                 None,
             )?;
 
-            let monitor_geometry = get_monitor_geometry(monitor.or(window_def.monitor_number))?;
+            let monitor_geometry = get_monitor_geometry(monitor.or(window_def.monitor.clone()))?;
 
             let mut eww_window = initialize_window(monitor_geometry, root_widget, window_def, window_scope)?;
             eww_window.gtk_window.style_context().add_class(&window_name.to_string());
 
-            // initialize script var handlers for variables that where not used before opening this window.
+            // initialize script var handlers for variables. As starting a scriptvar with the script_var_handler is idempodent,
+            // we can just start script vars that are already running without causing issues
             // TODO maybe this could be handled by having a track_newly_used_variables function in the scope tree?
             for used_var in self.scope_graph.borrow().variables_used_in_self_or_subscopes_of(eww_window.scope_index) {
                 if let Ok(script_var) = self.eww_config.get_script_var(&used_var) {
@@ -348,9 +355,8 @@ impl App {
                     // Generally, this should get disconnected before the gtk window gets destroyed.
                     // It serves as a fallback for when the window is closed manually.
                     let (response_sender, _) = daemon_response::create_pair();
-                    if let Err(err) = app_evt_sender
-                        .send(DaemonCommand::CloseWindows { windows: vec![window_name.clone()], sender: response_sender })
-                    {
+                    let command = DaemonCommand::CloseWindows { windows: vec![window_name.clone()], sender: response_sender };
+                    if let Err(err) = app_evt_sender.send(command) {
                         log::error!("Error sending close window command to daemon after gtk window destroy event: {}", err);
                     }
                 }
@@ -372,7 +378,8 @@ impl App {
         log::info!("Reloading windows");
 
         self.script_var_handler.stop_all();
-        self.script_var_handler = script_var_handler::init(self.app_evt_send.clone());
+        let old_handler = std::mem::replace(&mut self.script_var_handler, script_var_handler::init(self.app_evt_send.clone()));
+        old_handler.join_thread();
 
         log::trace!("loading config: {:#?}", config);
 
@@ -400,7 +407,7 @@ fn initialize_window(
     window_scope: ScopeIndex,
 ) -> Result<EwwWindow> {
     let window = display_backend::initialize_window(&window_def, monitor_geometry)
-        .with_context(|| format!("monitor {} is unavailable", window_def.monitor_number.unwrap()))?;
+        .with_context(|| format!("monitor {} is unavailable", window_def.monitor.clone().unwrap()))?;
 
     window.set_title(&format!("Eww - {}", window_def.name));
     window.set_position(gtk::WindowPosition::None);
@@ -475,17 +482,66 @@ fn on_screen_changed(window: &gtk::Window, _old_screen: Option<&gdk::Screen>) {
     window.set_visual(visual.as_ref());
 }
 
-/// Get the monitor geometry of a given monitor number, or the default if none is given
-fn get_monitor_geometry(n: Option<i32>) -> Result<gdk::Rectangle> {
-    #[allow(deprecated)]
+/// Get the monitor geometry of a given monitor, or the default if none is given
+fn get_monitor_geometry(identifier: Option<MonitorIdentifier>) -> Result<gdk::Rectangle> {
     let display = gdk::Display::default().expect("could not get default display");
-    let monitor = match n {
-        Some(n) => display.monitor(n).with_context(|| format!("Failed to get monitor with index {}", n))?,
+    let monitor = match identifier {
+        Some(ident) => {
+            let mon = get_monitor_from_display(&display, &ident);
+
+            #[cfg(feature = "x11")]
+            {
+                mon.with_context(|| {
+                    let head = format!("Failed to get monitor {}\nThe available monitors are:", ident);
+                    let mut body = String::new();
+                    for m in 0..display.n_monitors() {
+                        if let Some(model) = display.monitor(m).and_then(|x| x.model()) {
+                            body.push_str(format!("\n\t[{}] {}", m, model).as_str());
+                        }
+                    }
+                    format!("{}{}", head, body)
+                })?
+            }
+
+            #[cfg(not(feature = "x11"))]
+            {
+                mon.with_context(|| {
+                    if ident.is_numeric() {
+                        format!("Failed to get monitor {}", ident)
+                    } else {
+                        format!("Using ouput names (\"{}\" in the configuration) is not supported outside of x11 yet", ident)
+                    }
+                })?
+            }
+        }
         None => display
             .primary_monitor()
             .context("Failed to get primary monitor from GTK. Try explicitly specifying the monitor on your window.")?,
     };
     Ok(monitor.geometry())
+}
+
+/// Returns the [Monitor][gdk::Monitor] structure corresponding to the identifer.
+/// Outside of x11, only [MonitorIdentifier::Numeric] is supported
+pub fn get_monitor_from_display(display: &gdk::Display, identifier: &MonitorIdentifier) -> Option<gdk::Monitor> {
+    match identifier {
+        MonitorIdentifier::Numeric(num) => return display.monitor(*num),
+
+        #[cfg(not(feature = "x11"))]
+        MonitorIdentifier::Name(_) => return None,
+
+        #[cfg(feature = "x11")]
+        MonitorIdentifier::Name(name) => {
+            for m in 0..display.n_monitors() {
+                if let Some(model) = display.monitor(m).and_then(|x| x.model()) {
+                    if model == *name {
+                        return display.monitor(m);
+                    }
+                }
+            }
+        }
+    }
+    return None;
 }
 
 pub fn get_window_rectangle(geometry: WindowGeometry, screen_rect: gdk::Rectangle) -> gdk::Rectangle {
