@@ -516,6 +516,11 @@ fn build_gtk_image(bargs: &mut BuilderArgs) -> Result<gtk::Image> {
                 let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_file_at_size(std::path::PathBuf::from(path), image_width, image_height)?;
                 gtk_widget.set_from_pixbuf(Some(&pixbuf));
             }
+        },
+
+        // @prop icon-name - name of the icon
+        prop(icon_name: as_string) {
+            gtk_widget.set_from_icon_name(Some(icon_name.as_str()), gtk::IconSize::LargeToolbar);
         }
     });
     Ok(gtk_widget)
