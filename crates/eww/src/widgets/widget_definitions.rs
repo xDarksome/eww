@@ -519,8 +519,22 @@ fn build_gtk_image(bargs: &mut BuilderArgs) -> Result<gtk::Image> {
         },
 
         // @prop icon-name - name of the icon
-        prop(icon_name: as_string) {
-            gtk_widget.set_from_icon_name(Some(icon_name.as_str()), gtk::IconSize::LargeToolbar);
+        // @prop icon-size - size of the icon
+        // @prop fallback-icon-name - name of the icon to fall back to in case the original one is missing
+        prop(icon_name: as_string, icon_size: as_i32 = -1, fallback_icon_name: as_string = "") {
+            let theme = gtk::IconTheme::default().ok_or_else(|| anyhow!("GTK icon theme is missing"))?;
+            let flags = gtk::IconLookupFlags::empty();
+
+            let pixbuf = match theme.lookup_icon(icon_name.as_str(), icon_size, flags) {
+                Some(info) => info,
+                None if !fallback_icon_name.is_empty() => {
+                    theme.lookup_icon(fallback_icon_name.as_str(), icon_size, flags)
+                        .ok_or_else(|| anyhow!("Couldn't find fallback icon '{}'", fallback_icon_name))?
+                },
+                None => return Err(anyhow!("Couldn't find icon '{}'", icon_name)),
+            }.load_icon()?;
+
+            gtk_widget.set_from_pixbuf(Some(&pixbuf));
         }
     });
     Ok(gtk_widget)
